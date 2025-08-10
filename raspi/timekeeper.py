@@ -28,6 +28,7 @@ def _debug_log(message: str):
 
 APP_NAME = "computer-safety"
 DAILY_LIMIT_SECONDS = 30 * 60  # 30 minutes
+STATE_SAVE_INTERVAL_SECONDS = 10  # batch disk writes to reduce IO
 
 
 def get_username() -> str:
@@ -62,6 +63,7 @@ class PersistentState:
         self.path = state_dir / "state.json"
         self.date = today_str()
         self.seconds_used_today = 0
+        self._last_save_monotonic = time.monotonic()
         self._load()
 
     def _load(self):
@@ -95,10 +97,9 @@ class PersistentState:
             tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
             with tmp_path.open("w", encoding="utf-8") as f:
                 json.dump(tmp_data, f)
-                f.flush()
-                os.fsync(f.fileno())
             os.replace(tmp_path, self.path)
             _debug_log(f"Saved state: {tmp_data}")
+            self._last_save_monotonic = time.monotonic()
         except Exception:
             # Best-effort; ignore errors
             pass
@@ -110,6 +111,12 @@ class PersistentState:
             self.date = current
             self.seconds_used_today = 0
         self.seconds_used_today = max(0, int(self.seconds_used_today) + int(elapsed_seconds))
+        # Batch saves to reduce IO
+        now_mono = time.monotonic()
+        if now_mono - self._last_save_monotonic >= STATE_SAVE_INTERVAL_SECONDS:
+            self._save()
+
+    def force_save(self):
         self._save()
 
     def remaining_seconds(self) -> int:
@@ -186,6 +193,7 @@ class TimekeeperApp:
         self.root.protocol("WM_DELETE_WINDOW", self._disable_close)
 
         self._build_ui()
+        self.ui_visible = True
 
         # If already out of time, show message and logout
         if self.state.remaining_seconds() <= 0:
@@ -291,6 +299,7 @@ class TimekeeperApp:
             self.root.withdraw()
         except Exception:
             pass
+        self.ui_visible = False
 
     def _schedule_tick(self):
         self._tick()
@@ -311,7 +320,8 @@ class TimekeeperApp:
                 _debug_log(f"Tick: +0s (elapsed_float={elapsed_float:.3f})")
 
         remaining = self.state.remaining_seconds()
-        self._update_remaining_label(remaining)
+        if self.ui_visible:
+            self._update_remaining_label(remaining)
 
         if remaining <= 0:
             # End session if started, for logging
@@ -352,11 +362,17 @@ class TimekeeperApp:
         msg = ttk.Label(self.root, text="Time is up for today. See you tomorrow!", font=("Helvetica", 28, "bold"))
         msg.pack(expand=True)
         self.root.update_idletasks()
+        self.ui_visible = True
 
         delay_ms = 100 if immediate else 4000
         self.root.after(delay_ms, self._logout_user)
 
     def _logout_user(self):
+        # Ensure final state is flushed before ending the session
+        try:
+            self.state.force_save()
+        except Exception:
+            pass
         user = self.username
         # Try loginctl terminate-user first
         commands = [

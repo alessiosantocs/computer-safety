@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Computer Safety Timekeeper
+Comment=Enforces daily computer time limit
+Exec=/usr/local/bin/computer-safety-timekeeper
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after=panel
+

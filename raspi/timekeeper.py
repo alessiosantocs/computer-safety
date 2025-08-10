@@ -291,10 +291,6 @@ class TimekeeperApp:
             self.root.withdraw()
         except Exception:
             pass
-        try:
-            self.root.quit()
-        except Exception:
-            pass
 
     def _schedule_tick(self):
         self._tick()

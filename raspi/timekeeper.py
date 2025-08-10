@@ -11,6 +11,21 @@ import tkinter as tk
 from tkinter import ttk
 
 
+def _debug_enabled() -> bool:
+    return os.environ.get("COMPUTER_SAFETY_DEBUG", "0") in ("1", "true", "TRUE", "yes", "YES")
+
+
+def _debug_log(message: str):
+    if not _debug_enabled():
+        return
+    try:
+        ts = datetime.now().strftime("%H:%M:%S")
+        with open("/tmp/timekeeper-debug.log", "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {message}\n")
+    except Exception:
+        pass
+
+
 APP_NAME = "computer-safety"
 DAILY_LIMIT_SECONDS = 30 * 60  # 30 minutes
 
@@ -83,6 +98,7 @@ class PersistentState:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, self.path)
+            _debug_log(f"Saved state: {tmp_data}")
         except Exception:
             # Best-effort; ignore errors
             pass
@@ -258,6 +274,7 @@ class TimekeeperApp:
         # Record baseline used time at session start and reset monotonic baseline
         self.session_start_seconds_used = int(self.state.seconds_used_today)
         self.last_tick_monotonic = time.monotonic()
+        _debug_log("Session started; enabling tick updates")
         # Hide the modal to allow desktop use
         self._hide_modal()
 
@@ -285,12 +302,17 @@ class TimekeeperApp:
 
     def _tick(self):
         now = time.monotonic()
-        elapsed = max(0, int(now - self.last_tick_monotonic))
+        elapsed_float = now - self.last_tick_monotonic
+        elapsed = max(0, int(elapsed_float))
         self.last_tick_monotonic = now
 
         # Update persistence only while a session is active
-        if elapsed > 0 and self.session_started:
-            self.state.tick(elapsed)
+        if self.session_started:
+            if elapsed > 0:
+                _debug_log(f"Tick: +{elapsed}s (elapsed_float={elapsed_float:.3f})")
+                self.state.tick(elapsed)
+            else:
+                _debug_log(f"Tick: +0s (elapsed_float={elapsed_float:.3f})")
 
         remaining = self.state.remaining_seconds()
         self._update_remaining_label(remaining)

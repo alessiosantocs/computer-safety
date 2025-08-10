@@ -62,21 +62,27 @@ class PersistentState:
                     # New day
                     self.date = today_str()
                     self.seconds_used_today = 0
+                    self._save()
             except Exception:
                 # Corrupt or unreadable state: reset
                 self.date = today_str()
                 self.seconds_used_today = 0
+                self._save()
         else:
             self._save()
 
     def _save(self):
-        tmp = {
+        tmp_data = {
             "date": self.date,
             "seconds_used_today": int(self.seconds_used_today),
         }
         try:
-            with self.path.open("w", encoding="utf-8") as f:
-                json.dump(tmp, f)
+            tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+            with tmp_path.open("w", encoding="utf-8") as f:
+                json.dump(tmp_data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.path)
         except Exception:
             # Best-effort; ignore errors
             pass

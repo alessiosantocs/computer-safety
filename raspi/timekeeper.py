@@ -343,26 +343,26 @@ class TimekeeperApp:
         credit_frame = ttk.Frame(container)
         credit_frame.pack(anchor="nw", pady=(0, 16))
         
-        credit_label = ttk.Label(credit_frame, text="Credits:", font=("Helvetica", 20, "bold"))
+        credit_label = tk.Label(credit_frame, text="Credits:", font=("Helvetica", 20, "bold"))
         credit_label.pack(side=tk.LEFT, padx=(0, 8))
         
-        self.credit_display = ttk.Label(credit_frame, text="0", font=("Helvetica", 24, "bold"), foreground="green")
+        self.credit_display = tk.Label(credit_frame, text="0", font=("Helvetica", 24, "bold"), foreground="green")
         self.credit_display.pack(side=tk.LEFT)
         
         # Update credit display
         self._update_credit_display()
 
-        title = ttk.Label(container, text="Computer Time", font=("Helvetica", 32, "bold"))
+        title = tk.Label(container, text="Computer Time", font=("Helvetica", 32, "bold"))
         title.pack(pady=(0, 16))
 
-        self.remaining_label = ttk.Label(container, text="", font=("Helvetica", 28))
+        self.remaining_label = tk.Label(container, text="", font=("Helvetica", 28))
         self.remaining_label.pack(pady=(0, 24))
 
         # Goal selection UI
         goal_frame = ttk.Frame(container)
         goal_frame.pack(pady=12)
 
-        goal_title = ttk.Label(goal_frame, text="Set your goal for this session:", font=("Helvetica", 18, "bold"))
+        goal_title = tk.Label(goal_frame, text="Set your goal for this session:", font=("Helvetica", 18, "bold"))
         goal_title.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         self.category_var = tk.StringVar(value="")
@@ -371,7 +371,7 @@ class TimekeeperApp:
             rb = ttk.Radiobutton(goal_frame, text=cat, variable=self.category_var, value=cat, command=self._maybe_enable_start)
             rb.grid(row=1, column=idx, padx=8, sticky="w")
 
-        plan_label = ttk.Label(goal_frame, text="What exactly will you do?", font=("Helvetica", 14))
+        plan_label = tk.Label(goal_frame, text="What exactly will you do?", font=("Helvetica", 14))
         plan_label.grid(row=2, column=0, columnspan=3, sticky="w", pady=(12, 4))
 
         self.plan_var = tk.StringVar(value="")
@@ -388,15 +388,14 @@ class TimekeeperApp:
             pass
 
         # Earn Credit button
-        self.earn_credit_button = ttk.Button(container, text="Earn Credits", command=self._show_earn_credit_screen, 
-                                           font=("Helvetica", 14, "bold"))
+        self.earn_credit_button = ttk.Button(container, text="Earn Credits", command=self._show_earn_credit_screen)
         self.earn_credit_button.pack(pady=(8, 16))
         
         # Update earn credit button state
         self._update_earn_credit_button_state()
 
         # Footer hint
-        hint = ttk.Label(container, text="Your daily limit is 30 minutes. Time counts from login until logout.", font=("Helvetica", 12))
+        hint = tk.Label(container, text="Your daily limit is 30 minutes. Time counts from login until logout.", font=("Helvetica", 12))
         hint.pack(side=tk.BOTTOM, pady=(12, 0))
 
         # Make sure the window grabs focus
@@ -456,26 +455,26 @@ class TimekeeperApp:
         progress_frame = ttk.Frame(header_frame)
         progress_frame.pack(side=tk.RIGHT)
         
-        progress_text = ttk.Label(progress_frame, text="Questions Today:", font=("Helvetica", 16))
+        progress_text = tk.Label(progress_frame, text="Questions Today:", font=("Helvetica", 16))
         progress_text.pack(side=tk.LEFT, padx=(0, 8))
         
         answered, total = self.state.get_questions_progress()
-        self.progress_label = ttk.Label(progress_frame, text=f"{answered}/{total}", 
+        self.progress_label = tk.Label(progress_frame, text=f"{answered}/{total}", 
                                       font=("Helvetica", 18, "bold"), foreground="blue")
         self.progress_label.pack(side=tk.LEFT)
 
         # Title
-        title = ttk.Label(container, text="Earn Credits!", font=("Helvetica", 32, "bold"))
+        title = tk.Label(container, text="Earn Credits!", font=("Helvetica", 32, "bold"))
         title.pack(pady=(0, 16))
 
         # Credit display
         credit_frame = ttk.Frame(container)
         credit_frame.pack(pady=(0, 24))
         
-        credit_label = ttk.Label(credit_frame, text="Your Credits:", font=("Helvetica", 20))
+        credit_label = tk.Label(credit_frame, text="Your Credits:", font=("Helvetica", 20))
         credit_label.pack(side=tk.LEFT, padx=(0, 8))
         
-        self.earn_credit_display = ttk.Label(credit_frame, text=str(self.state.total_credits), 
+        self.earn_credit_display = tk.Label(credit_frame, text=str(self.state.total_credits), 
                                            font=("Helvetica", 24, "bold"), foreground="green")
         self.earn_credit_display.pack(side=tk.LEFT)
 
@@ -483,7 +482,7 @@ class TimekeeperApp:
         difficulty_frame = ttk.Frame(container)
         difficulty_frame.pack(pady=(0, 24))
         
-        difficulty_label = ttk.Label(difficulty_frame, text="Choose Difficulty:", font=("Helvetica", 18, "bold"))
+        difficulty_label = tk.Label(difficulty_frame, text="Choose Difficulty:", font=("Helvetica", 18, "bold"))
         difficulty_label.pack(pady=(0, 12))
         
         self.difficulty_var = tk.StringVar(value="easy")
@@ -498,32 +497,31 @@ class TimekeeperApp:
         self.question_frame = ttk.Frame(container)
         self.question_frame.pack(pady=(0, 24))
         
-        self.question_label = ttk.Label(self.question_frame, text="", font=("Helvetica", 24, "bold"))
+        self.question_label = tk.Label(self.question_frame, text="", font=("Helvetica", 24, "bold"))
         self.question_label.pack(pady=(0, 16))
         
         # Answer input
         answer_frame = ttk.Frame(self.question_frame)
         answer_frame.pack()
         
-        answer_label = ttk.Label(answer_frame, text="Your Answer:", font=("Helvetica", 16))
+        answer_label = tk.Label(answer_frame, text="Your Answer:", font=("Helvetica", 16))
         answer_label.pack(side=tk.LEFT, padx=(0, 8))
         
         self.answer_var = tk.StringVar(value="")
-        self.answer_entry = ttk.Entry(answer_frame, textvariable=self.answer_var, width=10, 
-                                    font=("Helvetica", 16))
+        self.answer_entry = ttk.Entry(answer_frame, textvariable=self.answer_var, width=10)
         self.answer_entry.pack(side=tk.LEFT, padx=(0, 16))
         
         self.submit_button = ttk.Button(answer_frame, text="Submit Answer", 
-                                      command=self._submit_answer, font=("Helvetica", 14))
+                                      command=self._submit_answer)
         self.submit_button.pack(side=tk.LEFT)
         
         # Result message
-        self.result_label = ttk.Label(container, text="", font=("Helvetica", 18))
+        self.result_label = tk.Label(container, text="", font=("Helvetica", 18))
         self.result_label.pack(pady=(0, 16))
         
         # Next question button (initially hidden)
         self.next_button = ttk.Button(container, text="Next Question", 
-                                    command=self._next_question, font=("Helvetica", 14))
+                                    command=self._next_question)
         
         # Generate first question
         self._generate_new_question()
@@ -771,11 +769,11 @@ class TimekeeperApp:
         msg_frame = ttk.Frame(self.root)
         msg_frame.pack(expand=True)
         
-        time_msg = ttk.Label(msg_frame, text="Time is up for today. See you tomorrow!", font=("Helvetica", 28, "bold"))
+        time_msg = tk.Label(msg_frame, text="Time is up for today. See you tomorrow!", font=("Helvetica", 28, "bold"))
         time_msg.pack(pady=(0, 20))
         
         # Show final credit balance
-        credit_msg = ttk.Label(msg_frame, text=f"Your total credits: {self.state.total_credits}", 
+        credit_msg = tk.Label(msg_frame, text=f"Your total credits: {self.state.total_credits}", 
                              font=("Helvetica", 20), foreground="green")
         credit_msg.pack()
         

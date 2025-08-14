@@ -21,10 +21,22 @@ def _debug_log(message: str):
         return
     try:
         ts = datetime.now().strftime("%H:%M:%S")
-        with open("/tmp/timekeeper-debug.log", "a", encoding="utf-8") as f:
-            f.write(f"[{ts}] {message}\n")
+        # Try multiple locations for debug log
+        log_locations = [
+            "/tmp/timekeeper-debug.log",
+            os.path.expanduser("~/timekeeper-debug.log"),
+            "/var/tmp/timekeeper-debug.log"
+        ]
+        
+        for log_path in log_locations:
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"[{ts}] {message}\n")
+                break  # Successfully wrote to one location
+            except (OSError, IOError):
+                continue  # Try next location
     except Exception:
-        pass
+        pass  # Silently fail if all logging attempts fail
 
 
 APP_NAME = "computer-safety"
@@ -221,8 +233,8 @@ class QuestionGenerator:
             answer = a * b
             question = f"What is {a} × {b}?"
         else:  # division
-            # Generate numbers that divide evenly
-            b = self.random.randint(1, 20)
+            # Generate numbers that divide evenly, ensuring b is never 0
+            b = self.random.randint(1, 20)  # b is 1-20, never 0
             a = b * self.random.randint(1, 10)  # Ensure division results in whole number
             answer = a // b
             question = f"What is {a} ÷ {b}?"
@@ -428,106 +440,174 @@ class TimekeeperApp:
         if not self.state.can_answer_question():
             return
         
-        # Clear main UI
+        # Track starting credits for this session
+        self.session_start_credits = self.state.total_credits
+        
+        # Clear all current UI elements and unbind events
         for child in self.root.winfo_children():
             try:
                 child.destroy()
             except Exception:
                 pass
         
+        # Clear any existing bindings to prevent memory leaks
+        try:
+            self.root.unbind("<Escape>")
+        except Exception:
+            pass
+        
+        # Ensure window is properly configured for the new screen
+        try:
+            self.root.attributes("-fullscreen", True)
+            self.root.attributes("-topmost", True)
+            self.root.focus_force()
+            self.root.lift()
+        except Exception:
+            pass
+        
         # Build earn credit UI
         self._build_earn_credit_ui()
+        
+        # Update the window
+        self.root.update_idletasks()
+        self.ui_visible = False  # We're not on the main screen anymore
 
     def _build_earn_credit_ui(self):
         """Build the earn credit screen UI."""
-        container = ttk.Frame(self.root, padding=32)
-        container.pack(fill=tk.BOTH, expand=True)
+        try:
+            container = ttk.Frame(self.root, padding=32)
+            container.pack(fill=tk.BOTH, expand=True)
+            
+            # Add a simple test label first to see if anything shows up
+            test_label = tk.Label(container, text="Building Earn Credit UI...", font=("Helvetica", 16))
+            test_label.pack(pady=20)
+            
+            # Force update to see the test label
+            self.root.update_idletasks()
 
-        # Header with back button and progress
-        header_frame = ttk.Frame(container)
-        header_frame.pack(fill=tk.X, pady=(0, 24))
-        
-        back_button = ttk.Button(header_frame, text="← Back to Main", command=self._return_to_main, 
-                               font=("Helvetica", 14))
-        back_button.pack(side=tk.LEFT)
-        
-        # Progress display (right side)
-        progress_frame = ttk.Frame(header_frame)
-        progress_frame.pack(side=tk.RIGHT)
-        
-        progress_text = tk.Label(progress_frame, text="Questions Today:", font=("Helvetica", 16))
-        progress_text.pack(side=tk.LEFT, padx=(0, 8))
-        
-        answered, total = self.state.get_questions_progress()
-        self.progress_label = tk.Label(progress_frame, text=f"{answered}/{total}", 
-                                      font=("Helvetica", 18, "bold"), foreground="blue")
-        self.progress_label.pack(side=tk.LEFT)
+            # Header with back button and progress
+            header_frame = ttk.Frame(container)
+            header_frame.pack(fill=tk.X, pady=(0, 24))
+            
+            # Make back button more prominent and ensure it's always visible
+            back_button = ttk.Button(header_frame, text="← Back to Main", command=self._return_to_main)
+            back_button.pack(side=tk.LEFT, padx=(0, 20))
+            
+            # Add a backup back button method in case the main one fails
+            def backup_return():
+                try:
+                    self._return_to_main()
+                except Exception:
+                    # If the main method fails, force a restart
+                    self.root.after(100, self._restart_app)
+            
+            # Bind the backup method to a different event (right-click)
+            back_button.bind("<Button-3>", lambda e: backup_return())
+            
+            # Add a visual separator
+            separator = ttk.Separator(header_frame, orient='vertical')
+            separator.pack(side=tk.LEFT, fill=tk.Y, padx=10)
+            
+            # Progress display (right side)
+            progress_frame = ttk.Frame(header_frame)
+            progress_frame.pack(side=tk.RIGHT)
+            
+            progress_text = tk.Label(progress_frame, text="Questions Today:", font=("Helvetica", 16))
+            progress_text.pack(side=tk.LEFT, padx=(0, 8))
+            
+            answered, total = self.state.get_questions_progress()
+            self.progress_label = tk.Label(progress_frame, text=f"{answered}/{total}", 
+                                          font=("Helvetica", 18, "bold"), foreground="blue")
+            self.progress_label.pack(side=tk.LEFT)
 
-        # Title
-        title = tk.Label(container, text="Earn Credits!", font=("Helvetica", 32, "bold"))
-        title.pack(pady=(0, 16))
+            # Title
+            title = tk.Label(container, text="Earn Credits!", font=("Helvetica", 32, "bold"))
+            title.pack(pady=(0, 16))
 
-        # Credit display
-        credit_frame = ttk.Frame(container)
-        credit_frame.pack(pady=(0, 24))
-        
-        credit_label = tk.Label(credit_frame, text="Your Credits:", font=("Helvetica", 20))
-        credit_label.pack(side=tk.LEFT, padx=(0, 8))
-        
-        self.earn_credit_display = tk.Label(credit_frame, text=str(self.state.total_credits), 
-                                           font=("Helvetica", 24, "bold"), foreground="green")
-        self.earn_credit_display.pack(side=tk.LEFT)
+            # Credit display
+            credit_frame = ttk.Frame(container)
+            credit_frame.pack(pady=(0, 24))
+            
+            credit_label = tk.Label(credit_frame, text="Your Credits:", font=("Helvetica", 20))
+            credit_label.pack(side=tk.LEFT, padx=(0, 8))
+            
+            self.earn_credit_display = tk.Label(credit_frame, text=str(self.state.total_credits), 
+                                               font=("Helvetica", 24, "bold"), foreground="green")
+            self.earn_credit_display.pack(side=tk.LEFT)
 
-        # Difficulty selection
-        difficulty_frame = ttk.Frame(container)
-        difficulty_frame.pack(pady=(0, 24))
-        
-        difficulty_label = tk.Label(difficulty_frame, text="Choose Difficulty:", font=("Helvetica", 18, "bold"))
-        difficulty_label.pack(pady=(0, 12))
-        
-        self.difficulty_var = tk.StringVar(value="easy")
-        difficulties = [("Easy (1 point)", "easy"), ("Medium (2 points)", "medium")]
-        
-        for text, value in difficulties:
-            rb = ttk.Radiobutton(difficulty_frame, text=text, variable=self.difficulty_var, 
-                               value=value, font=("Helvetica", 14))
-            rb.pack(pady=4)
+            # Session progress indicator
+            if hasattr(self, 'session_start_credits'):
+                earned_this_session = self.state.total_credits - self.session_start_credits
+                if earned_this_session > 0:
+                    session_progress = tk.Label(credit_frame, text=f" (+{earned_this_session} this session)", 
+                                              font=("Helvetica", 16), foreground="blue")
+                    session_progress.pack(side=tk.LEFT, padx=(8, 0))
 
-        # Question display
-        self.question_frame = ttk.Frame(container)
-        self.question_frame.pack(pady=(0, 24))
-        
-        self.question_label = tk.Label(self.question_frame, text="", font=("Helvetica", 24, "bold"))
-        self.question_label.pack(pady=(0, 16))
-        
-        # Answer input
-        answer_frame = ttk.Frame(self.question_frame)
-        answer_frame.pack()
-        
-        answer_label = tk.Label(answer_frame, text="Your Answer:", font=("Helvetica", 16))
-        answer_label.pack(side=tk.LEFT, padx=(0, 8))
-        
-        self.answer_var = tk.StringVar(value="")
-        self.answer_entry = ttk.Entry(answer_frame, textvariable=self.answer_var, width=10)
-        self.answer_entry.pack(side=tk.LEFT, padx=(0, 16))
-        
-        self.submit_button = ttk.Button(answer_frame, text="Submit Answer", 
-                                      command=self._submit_answer)
-        self.submit_button.pack(side=tk.LEFT)
-        
-        # Result message
-        self.result_label = tk.Label(container, text="", font=("Helvetica", 18))
-        self.result_label.pack(pady=(0, 16))
-        
-        # Next question button (initially hidden)
-        self.next_button = ttk.Button(container, text="Next Question", 
-                                    command=self._next_question)
-        
-        # Generate first question
-        self._generate_new_question()
-        
-        # Bind Enter key to submit
-        self.answer_entry.bind("<Return>", lambda e: self._submit_answer())
+            # Difficulty selection
+            difficulty_frame = ttk.Frame(container)
+            difficulty_frame.pack(pady=(0, 24))
+            
+            difficulty_label = tk.Label(difficulty_frame, text="Choose Difficulty:", font=("Helvetica", 18, "bold"))
+            difficulty_label.pack(pady=(0, 12))
+            
+            self.difficulty_var = tk.StringVar(value="easy")
+            difficulties = [("Easy (1 point)", "easy"), ("Medium (2 points)", "medium")]
+            
+            for text, value in difficulties:
+                rb = ttk.Radiobutton(difficulty_frame, text=text, variable=self.difficulty_var, 
+                                   value=value)
+                rb.pack(pady=4)
+
+            # Question display
+            self.question_frame = ttk.Frame(container)
+            self.question_frame.pack(pady=(0, 24))
+            
+            self.question_label = tk.Label(self.question_frame, text="", font=("Helvetica", 24, "bold"))
+            self.question_label.pack(pady=(0, 16))
+            
+            # Answer input
+            answer_frame = ttk.Frame(self.question_frame)
+            answer_frame.pack()
+            
+            answer_label = tk.Label(answer_frame, text="Your Answer:", font=("Helvetica", 16))
+            answer_label.pack(side=tk.LEFT, padx=(0, 8))
+            
+            self.answer_var = tk.StringVar(value="")
+            self.answer_entry = ttk.Entry(answer_frame, textvariable=self.answer_var, width=10)
+            self.answer_entry.pack(side=tk.LEFT, padx=(0, 16))
+            
+            self.submit_button = ttk.Button(answer_frame, text="Submit Answer", 
+                                          command=self._submit_answer)
+            self.submit_button.pack(side=tk.LEFT)
+            
+            # Result message
+            self.result_label = tk.Label(container, text="", font=("Helvetica", 18))
+            self.result_label.pack(pady=(0, 16))
+            
+            # Next question button (initially hidden)
+            self.next_button = ttk.Button(container, text="Next Question", 
+                                        command=self._next_question)
+            
+            # Remove the test label now that everything is built
+            test_label.destroy()
+            
+            # Generate first question
+            self._generate_new_question()
+            
+            # Bind Enter key to submit
+            self.answer_entry.bind("<Return>", lambda e: self._submit_answer())
+            
+            # Bind Escape key to go back
+            self.root.bind("<Escape>", lambda e: self._return_to_main())
+            
+            # Final update
+            self.root.update_idletasks()
+            
+        except Exception as e:
+            # If there's an error, show it and go back to main
+            error_label = tk.Label(self.root, text=f"Error building UI: {str(e)}", font=("Helvetica", 16), foreground="red")
+            error_label.pack(expand=True)
+            self.root.after(3000, self._return_to_main)  # Go back after 3 seconds
 
     def _generate_new_question(self):
         """Generate a new question based on selected difficulty."""
@@ -644,13 +724,117 @@ class TimekeeperApp:
 
     def _return_to_main(self):
         """Return to the main screen."""
-        # Rebuild main UI
-        self._build_ui()
-        self.ui_visible = True
+        # Check if user has earned credits in this session
+        current_credits = self.state.total_credits
         
-        # Update displays
-        self._update_credit_display()
-        self._update_earn_credit_button_state()
+        # Show confirmation dialog if they've made progress
+        if hasattr(self, 'session_start_credits'):
+            if current_credits > self.session_start_credits:
+                # They earned credits, show confirmation
+                self._show_return_confirmation()
+                return
+        
+        # No credits earned or no session, go back directly
+        self._do_return_to_main()
+    
+    def _show_return_confirmation(self):
+        """Show confirmation dialog before returning to main."""
+        # Create confirmation dialog
+        confirm_window = tk.Toplevel(self.root)
+        confirm_window.title("Confirm Return")
+        confirm_window.geometry("400x200")
+        confirm_window.transient(self.root)
+        confirm_window.grab_set()
+        
+        # Center the dialog
+        confirm_window.geometry("+%d+%d" % (self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 100))
+        
+        # Dialog content
+        msg = tk.Label(confirm_window, text="You've earned credits in this session!", 
+                      font=("Helvetica", 16, "bold"), foreground="green")
+        msg.pack(pady=(20, 10))
+        
+        sub_msg = tk.Label(confirm_window, text="Are you sure you want to return to the main screen?", 
+                          font=("Helvetica", 12))
+        sub_msg.pack(pady=(0, 20))
+        
+        # Buttons
+        button_frame = ttk.Frame(confirm_window)
+        button_frame.pack(pady=(0, 20))
+        
+        yes_button = ttk.Button(button_frame, text="Yes, Return", 
+                               command=lambda: [confirm_window.destroy(), self._do_return_to_main()])
+        yes_button.pack(side=tk.LEFT, padx=10)
+        
+        no_button = ttk.Button(button_frame, text="No, Stay Here", 
+                              command=confirm_window.destroy)
+        no_button.pack(side=tk.LEFT, padx=10)
+        
+        # Focus on the dialog
+        confirm_window.focus_force()
+    
+    def _do_return_to_main(self):
+        """Actually perform the return to main screen."""
+        try:
+            # Clear all current UI elements and unbind events
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+            
+            # Clear any existing bindings to prevent memory leaks
+            try:
+                self.root.unbind("<Escape>")
+            except Exception:
+                pass
+            
+            # Ensure window is properly configured for main screen
+            try:
+                self.root.attributes("-fullscreen", True)
+                self.root.attributes("-topmost", True)
+                self.root.focus_force()
+                self.root.lift()
+            except Exception:
+                pass
+            
+            # Rebuild main UI
+            self._build_ui()
+            self.ui_visible = True
+            
+            # Update all displays and states
+            self._update_credit_display()
+            self._update_earn_credit_button_state()
+            
+            # Force update to ensure everything is displayed
+            self.root.update_idletasks()
+            
+            # Log the return to main screen for debugging
+            _debug_log("Returned to main screen from earn credit screen")
+            
+        except Exception as e:
+            # If something goes wrong, try to recover
+            _debug_log(f"Error returning to main: {str(e)}")
+            try:
+                # Force a complete rebuild
+                for child in self.root.winfo_children():
+                    child.destroy()
+                self._build_ui()
+                self.ui_visible = True
+                self.root.update_idletasks()
+            except Exception:
+                # Last resort - restart the app
+                self.root.after(1000, self._restart_app)
+    
+    def _restart_app(self):
+        """Restart the app if recovery fails."""
+        try:
+            # Properly restart the entire program
+            python = sys.executable
+            os.execl(python, python, *sys.argv)
+        except Exception:
+            # If all else fails, exit gracefully
+            os._exit(1)
 
     def _maybe_enable_start(self):
         category_ok = bool(self.category_var.get())
@@ -717,10 +901,15 @@ class TimekeeperApp:
 
         remaining = self.state.remaining_seconds()
         if self.ui_visible:
-            self._update_remaining_label(remaining)
-            # Also update credit displays and button states
-            self._update_credit_display()
-            self._update_earn_credit_button_state()
+            try:
+                self._update_remaining_label(remaining)
+                # Also update credit displays and button states
+                self._update_credit_display()
+                self._update_earn_credit_button_state()
+            except Exception as e:
+                _debug_log(f"Error updating UI in tick: {str(e)}")
+                # If UI update fails, mark UI as not visible to prevent further errors
+                self.ui_visible = False
 
         if remaining <= 0:
             # End session if started, for logging

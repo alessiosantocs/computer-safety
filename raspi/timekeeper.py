@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import subprocess
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 import tkinter as tk
@@ -57,12 +58,15 @@ def today_str() -> str:
 
 
 class PersistentState:
-    """Minimal persistence: per-user daily usage counter."""
+    """Minimal persistence: per-user daily usage counter and credit system."""
 
     def __init__(self, state_dir: Path):
         self.path = state_dir / "state.json"
         self.date = today_str()
         self.seconds_used_today = 0
+        self.total_credits = 0
+        self.questions_answered_today = 0
+        self.last_question_date = today_str()
         self._last_save_monotonic = time.monotonic()
         self._load()
 
@@ -75,15 +79,24 @@ class PersistentState:
                 if file_date == today_str():
                     self.date = file_date
                     self.seconds_used_today = int(data.get("seconds_used_today", 0))
+                    self.total_credits = int(data.get("total_credits", 0))
+                    self.questions_answered_today = int(data.get("questions_answered_today", 0))
+                    self.last_question_date = data.get("last_question_date", today_str())
                 else:
-                    # New day
+                    # New day - reset daily counters but keep credits
                     self.date = today_str()
                     self.seconds_used_today = 0
+                    self.total_credits = int(data.get("total_credits", 0))  # Credits persist
+                    self.questions_answered_today = 0
+                    self.last_question_date = today_str()
                     self._save()
             except Exception:
                 # Corrupt or unreadable state: reset
                 self.date = today_str()
                 self.seconds_used_today = 0
+                self.total_credits = 0
+                self.questions_answered_today = 0
+                self.last_question_date = today_str()
                 self._save()
         else:
             self._save()
@@ -92,6 +105,9 @@ class PersistentState:
         tmp_data = {
             "date": self.date,
             "seconds_used_today": int(self.seconds_used_today),
+            "total_credits": int(self.total_credits),
+            "questions_answered_today": int(self.questions_answered_today),
+            "last_question_date": self.last_question_date,
         }
         try:
             tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -122,6 +138,96 @@ class PersistentState:
     def remaining_seconds(self) -> int:
         remaining = DAILY_LIMIT_SECONDS - int(self.seconds_used_today)
         return max(0, remaining)
+
+    def add_credits(self, amount: int):
+        """Add credits to user's account."""
+        self.total_credits = max(0, self.total_credits + amount)
+        self._save()
+
+    def can_answer_question(self) -> bool:
+        """Check if user can answer more questions today."""
+        current = today_str()
+        if current != self.last_question_date:
+            # New day, reset question counter
+            self.questions_answered_today = 0
+            self.last_question_date = current
+            self._save()
+        return self.questions_answered_today < 20
+
+    def record_question_answered(self):
+        """Record that a question was answered (regardless of correctness)."""
+        current = today_str()
+        if current != self.last_question_date:
+            # New day, reset question counter
+            self.questions_answered_today = 0
+            self.last_question_date = current
+        self.questions_answered_today += 1
+        self._save()
+
+    def get_questions_progress(self) -> tuple[int, int]:
+        """Get current question progress (answered, total)."""
+        current = today_str()
+        if current != self.last_question_date:
+            return (0, 20)
+        return (self.questions_answered_today, 20)
+
+
+class QuestionGenerator:
+    """Generates random math questions for the credit system."""
+
+    def __init__(self):
+        self.random = random.Random()
+
+    def generate_question(self, difficulty: str) -> tuple[str, int, int]:
+        """
+        Generate a random math question.
+
+        Args:
+            difficulty: 'easy', 'medium', or 'hard'
+
+        Returns:
+            tuple: (question_text, correct_answer, points_earned)
+        """
+        if difficulty.lower() == 'easy':
+            return self._generate_easy_question()
+        elif difficulty.lower() == 'medium':
+            return self._generate_medium_question()
+        else:
+            # Default to easy if invalid difficulty
+            return self._generate_easy_question()
+
+    def _generate_easy_question(self) -> tuple[str, int, int]:
+        """Generate addition or subtraction question (1-100 range)."""
+        op = self.random.choice(['+', '-'])
+        if op == '+':
+            a = self.random.randint(1, 50)
+            b = self.random.randint(1, 50)
+            answer = a + b
+            question = f"What is {a} + {b}?"
+        else:  # subtraction
+            a = self.random.randint(1, 100)
+            b = self.random.randint(1, a)  # Ensure positive result
+            answer = a - b
+            question = f"What is {a} - {b}?"
+
+        return question, answer, 1  # 1 point for easy
+
+    def _generate_medium_question(self) -> tuple[str, int, int]:
+        """Generate multiplication or division question (1-20 range)."""
+        op = self.random.choice(['×', '÷'])
+        if op == '×':
+            a = self.random.randint(1, 20)
+            b = self.random.randint(1, 20)
+            answer = a * b
+            question = f"What is {a} × {b}?"
+        else:  # division
+            # Generate numbers that divide evenly
+            b = self.random.randint(1, 20)
+            a = b * self.random.randint(1, 10)  # Ensure division results in whole number
+            answer = a // b
+            question = f"What is {a} ÷ {b}?"
+
+        return question, answer, 2  # 2 points for medium
 
 
 class SessionLogger:
@@ -164,6 +270,28 @@ class SessionLogger:
         self._append_line(entry)
         self.current_entry = None
 
+    def log_credit_earned(self, difficulty: str, question: str, correct: bool, points: int):
+        """Log credit earning activity."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "event": "credit_earned",
+            "timestamp": now_iso,
+            "difficulty": difficulty,
+            "question": question,
+            "correct": correct,
+            "points": points,
+        }
+        self._append_line(entry)
+
+    def log_question_limit_reached(self):
+        """Log when daily question limit is reached."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "event": "question_limit_reached",
+            "timestamp": now_iso,
+        }
+        self._append_line(entry)
+
     def _append_line(self, obj: dict):
         try:
             with self._log_path().open("a", encoding="utf-8") as f:
@@ -178,6 +306,7 @@ class TimekeeperApp:
         self.state_dir, self.logs_dir = get_data_dirs()
         self.state = PersistentState(self.state_dir)
         self.logger = SessionLogger(self.logs_dir)
+        self.question_generator = QuestionGenerator()
         self.last_tick_monotonic = time.monotonic()
         self.session_started = False
         self.session_start_seconds_used = None
@@ -209,6 +338,19 @@ class TimekeeperApp:
     def _build_ui(self):
         container = ttk.Frame(self.root, padding=32)
         container.pack(fill=tk.BOTH, expand=True)
+
+        # Credit display in top-left
+        credit_frame = ttk.Frame(container)
+        credit_frame.pack(anchor="nw", pady=(0, 16))
+        
+        credit_label = ttk.Label(credit_frame, text="Credits:", font=("Helvetica", 20, "bold"))
+        credit_label.pack(side=tk.LEFT, padx=(0, 8))
+        
+        self.credit_display = ttk.Label(credit_frame, text="0", font=("Helvetica", 24, "bold"), foreground="green")
+        self.credit_display.pack(side=tk.LEFT)
+        
+        # Update credit display
+        self._update_credit_display()
 
         title = ttk.Label(container, text="Computer Time", font=("Helvetica", 32, "bold"))
         title.pack(pady=(0, 16))
@@ -245,6 +387,14 @@ class TimekeeperApp:
         except Exception:
             pass
 
+        # Earn Credit button
+        self.earn_credit_button = ttk.Button(container, text="Earn Credits", command=self._show_earn_credit_screen, 
+                                           font=("Helvetica", 14, "bold"))
+        self.earn_credit_button.pack(pady=(8, 16))
+        
+        # Update earn credit button state
+        self._update_earn_credit_button_state()
+
         # Footer hint
         hint = ttk.Label(container, text="Your daily limit is 30 minutes. Time counts from login until logout.", font=("Helvetica", 12))
         hint.pack(side=tk.BOTTOM, pady=(12, 0))
@@ -255,6 +405,254 @@ class TimekeeperApp:
             self.root.grab_set_global()
         except Exception:
             pass
+
+    def _update_credit_display(self):
+        """Update the credit display with current credits."""
+        try:
+            self.credit_display.config(text=str(self.state.total_credits))
+        except Exception:
+            pass
+
+    def _update_earn_credit_button_state(self):
+        """Update the earn credit button state based on daily question limit."""
+        try:
+            if self.state.can_answer_question():
+                self.earn_credit_button.config(state=tk.NORMAL, text="Earn Credits")
+            else:
+                self.earn_credit_button.config(state=tk.DISABLED, text="Daily Limit Reached (20/20)")
+        except Exception:
+            pass
+
+    def _show_earn_credit_screen(self):
+        """Show the earn credit screen with questions."""
+        # Check if user can answer more questions
+        if not self.state.can_answer_question():
+            return
+        
+        # Clear main UI
+        for child in self.root.winfo_children():
+            try:
+                child.destroy()
+            except Exception:
+                pass
+        
+        # Build earn credit UI
+        self._build_earn_credit_ui()
+
+    def _build_earn_credit_ui(self):
+        """Build the earn credit screen UI."""
+        container = ttk.Frame(self.root, padding=32)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        # Header with back button and progress
+        header_frame = ttk.Frame(container)
+        header_frame.pack(fill=tk.X, pady=(0, 24))
+        
+        back_button = ttk.Button(header_frame, text="← Back to Main", command=self._return_to_main, 
+                               font=("Helvetica", 14))
+        back_button.pack(side=tk.LEFT)
+        
+        # Progress display (right side)
+        progress_frame = ttk.Frame(header_frame)
+        progress_frame.pack(side=tk.RIGHT)
+        
+        progress_text = ttk.Label(progress_frame, text="Questions Today:", font=("Helvetica", 16))
+        progress_text.pack(side=tk.LEFT, padx=(0, 8))
+        
+        answered, total = self.state.get_questions_progress()
+        self.progress_label = ttk.Label(progress_frame, text=f"{answered}/{total}", 
+                                      font=("Helvetica", 18, "bold"), foreground="blue")
+        self.progress_label.pack(side=tk.LEFT)
+
+        # Title
+        title = ttk.Label(container, text="Earn Credits!", font=("Helvetica", 32, "bold"))
+        title.pack(pady=(0, 16))
+
+        # Credit display
+        credit_frame = ttk.Frame(container)
+        credit_frame.pack(pady=(0, 24))
+        
+        credit_label = ttk.Label(credit_frame, text="Your Credits:", font=("Helvetica", 20))
+        credit_label.pack(side=tk.LEFT, padx=(0, 8))
+        
+        self.earn_credit_display = ttk.Label(credit_frame, text=str(self.state.total_credits), 
+                                           font=("Helvetica", 24, "bold"), foreground="green")
+        self.earn_credit_display.pack(side=tk.LEFT)
+
+        # Difficulty selection
+        difficulty_frame = ttk.Frame(container)
+        difficulty_frame.pack(pady=(0, 24))
+        
+        difficulty_label = ttk.Label(difficulty_frame, text="Choose Difficulty:", font=("Helvetica", 18, "bold"))
+        difficulty_label.pack(pady=(0, 12))
+        
+        self.difficulty_var = tk.StringVar(value="easy")
+        difficulties = [("Easy (1 point)", "easy"), ("Medium (2 points)", "medium")]
+        
+        for text, value in difficulties:
+            rb = ttk.Radiobutton(difficulty_frame, text=text, variable=self.difficulty_var, 
+                               value=value, font=("Helvetica", 14))
+            rb.pack(pady=4)
+
+        # Question display
+        self.question_frame = ttk.Frame(container)
+        self.question_frame.pack(pady=(0, 24))
+        
+        self.question_label = ttk.Label(self.question_frame, text="", font=("Helvetica", 24, "bold"))
+        self.question_label.pack(pady=(0, 16))
+        
+        # Answer input
+        answer_frame = ttk.Frame(self.question_frame)
+        answer_frame.pack()
+        
+        answer_label = ttk.Label(answer_frame, text="Your Answer:", font=("Helvetica", 16))
+        answer_label.pack(side=tk.LEFT, padx=(0, 8))
+        
+        self.answer_var = tk.StringVar(value="")
+        self.answer_entry = ttk.Entry(answer_frame, textvariable=self.answer_var, width=10, 
+                                    font=("Helvetica", 16))
+        self.answer_entry.pack(side=tk.LEFT, padx=(0, 16))
+        
+        self.submit_button = ttk.Button(answer_frame, text="Submit Answer", 
+                                      command=self._submit_answer, font=("Helvetica", 14))
+        self.submit_button.pack(side=tk.LEFT)
+        
+        # Result message
+        self.result_label = ttk.Label(container, text="", font=("Helvetica", 18))
+        self.result_label.pack(pady=(0, 16))
+        
+        # Next question button (initially hidden)
+        self.next_button = ttk.Button(container, text="Next Question", 
+                                    command=self._next_question, font=("Helvetica", 14))
+        
+        # Generate first question
+        self._generate_new_question()
+        
+        # Bind Enter key to submit
+        self.answer_entry.bind("<Return>", lambda e: self._submit_answer())
+
+    def _generate_new_question(self):
+        """Generate a new question based on selected difficulty."""
+        difficulty = self.difficulty_var.get()
+        self.current_question, self.current_answer, self.current_points = self.question_generator.generate_question(difficulty)
+        
+        # Update UI
+        self.question_label.config(text=self.current_question)
+        self.answer_var.set("")
+        self.answer_entry.focus()
+        
+        # Hide result and next button
+        self.result_label.config(text="")
+        self.next_button.pack_forget()
+        
+        # Enable submit button
+        self.submit_button.config(state=tk.NORMAL)
+
+    def _submit_answer(self):
+        """Submit the user's answer and check if correct."""
+        try:
+            user_answer = int(self.answer_var.get().strip())
+        except ValueError:
+            self.result_label.config(text="Please enter a valid number!", foreground="red")
+            return
+        
+        # Disable submit button
+        self.submit_button.config(state=tk.DISABLED)
+        
+        # Check answer
+        if user_answer == self.current_answer:
+            # Correct answer
+            self.state.add_credits(self.current_points)
+            self.state.record_question_answered()
+            
+            # Log the activity
+            self.logger.log_credit_earned(
+                self.difficulty_var.get(), 
+                self.current_question, 
+                True, 
+                self.current_points
+            )
+            
+            # Update displays
+            self._update_credit_display()
+            self.earn_credit_display.config(text=str(self.state.total_credits))
+            self._update_progress()
+            
+            # Show success message
+            self.result_label.config(text=f"Correct! +{self.current_points} credits earned!", foreground="green")
+            
+            # Check if daily limit reached
+            if not self.state.can_answer_question():
+                self._show_daily_limit_reached()
+                return
+        else:
+            # Wrong answer
+            self.state.record_question_answered()
+            
+            # Log the activity
+            self.logger.log_credit_earned(
+                self.difficulty_var.get(), 
+                self.current_question, 
+                False, 
+                0
+            )
+            
+            # Update progress
+            self._update_progress()
+            
+            # Show failure message
+            self.result_label.config(text=f"Wrong! The answer was {self.current_answer}. No credits earned.", foreground="red")
+            
+            # Check if daily limit reached
+            if not self.state.can_answer_question():
+                self._show_daily_limit_reached()
+                return
+        
+        # Show next question button
+        self.next_button.pack()
+
+    def _next_question(self):
+        """Move to the next question."""
+        self._generate_new_question()
+
+    def _update_progress(self):
+        """Update the progress display."""
+        answered, total = self.state.get_questions_progress()
+        self.progress_label.config(text=f"{answered}/{total}")
+        
+        # Update main earn credit button state
+        self._update_earn_credit_button_state()
+
+    def _show_daily_limit_reached(self):
+        """Show message when daily question limit is reached."""
+        # Log the event
+        self.logger.log_question_limit_reached()
+        
+        # Clear question area
+        for child in self.question_frame.winfo_children():
+            try:
+                child.destroy()
+            except Exception:
+                pass
+        
+        # Show limit message
+        limit_label = ttk.Label(self.question_frame, 
+                              text="You've reached your daily limit of 20 questions!\nCome back tomorrow for more!", 
+                              font=("Helvetica", 20, "bold"), foreground="orange")
+        limit_label.pack(pady=20)
+        
+        # Hide next button
+        self.next_button.pack_forget()
+
+    def _return_to_main(self):
+        """Return to the main screen."""
+        # Rebuild main UI
+        self._build_ui()
+        self.ui_visible = True
+        
+        # Update displays
+        self._update_credit_display()
+        self._update_earn_credit_button_state()
 
     def _maybe_enable_start(self):
         category_ok = bool(self.category_var.get())
@@ -322,6 +720,9 @@ class TimekeeperApp:
         remaining = self.state.remaining_seconds()
         if self.ui_visible:
             self._update_remaining_label(remaining)
+            # Also update credit displays and button states
+            self._update_credit_display()
+            self._update_earn_credit_button_state()
 
         if remaining <= 0:
             # End session if started, for logging
@@ -341,6 +742,12 @@ class TimekeeperApp:
             pass
 
     def _show_time_up_and_logout(self, immediate: bool):
+        # Ensure final state is flushed before ending the session
+        try:
+            self.state.force_save()
+        except Exception:
+            pass
+        
         # Bring modal back to front in fullscreen to show message
         try:
             self.root.deiconify()
@@ -359,8 +766,19 @@ class TimekeeperApp:
                 child.destroy()
             except Exception:
                 pass
-        msg = ttk.Label(self.root, text="Time is up for today. See you tomorrow!", font=("Helvetica", 28, "bold"))
-        msg.pack(expand=True)
+        
+        # Show time up message with credit info
+        msg_frame = ttk.Frame(self.root)
+        msg_frame.pack(expand=True)
+        
+        time_msg = ttk.Label(msg_frame, text="Time is up for today. See you tomorrow!", font=("Helvetica", 28, "bold"))
+        time_msg.pack(pady=(0, 20))
+        
+        # Show final credit balance
+        credit_msg = ttk.Label(msg_frame, text=f"Your total credits: {self.state.total_credits}", 
+                             font=("Helvetica", 20), foreground="green")
+        credit_msg.pack()
+        
         self.root.update_idletasks()
         self.ui_visible = True
 

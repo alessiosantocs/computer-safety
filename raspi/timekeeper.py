@@ -247,8 +247,9 @@ class SessionLogger:
         self.logs_dir = logs_dir
         self.current_entry = None
 
-    def _log_path(self) -> Path:
-        date_str = today_str()
+    def _log_path(self, date_str: str = None) -> Path:
+        if date_str is None:
+            date_str = today_str()
         user_log_dir = self.logs_dir / date_str
         user_log_dir.mkdir(parents=True, exist_ok=True)
         # One file per user per day
@@ -303,6 +304,72 @@ class SessionLogger:
             "timestamp": now_iso,
         }
         self._append_line(entry)
+
+    def log_credit_spent(self, amount: int, description: str):
+        """Log credit spending activity (for future use)."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "event": "credit_spent",
+            "timestamp": now_iso,
+            "amount": amount,
+            "description": description,
+        }
+        self._append_line(entry)
+
+    def get_credit_transactions(self, days_back: int = 30) -> list[dict]:
+        """Get all credit transactions from the last N days."""
+        transactions = []
+        username = get_username()
+        
+        # Get dates for the last N days
+        from datetime import datetime, timedelta
+        current_date = datetime.now().date()
+        
+        for i in range(days_back):
+            check_date = current_date - timedelta(days=i)
+            date_str = check_date.strftime("%Y-%m-%d")
+            log_path = self._log_path(date_str)
+            
+            if not log_path.exists():
+                continue
+                
+            try:
+                with log_path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            # Only include credit-related events
+                            if entry.get("event") in ["credit_earned", "credit_spent"]:
+                                # Add backward compatibility for entries without timestamps
+                                if "timestamp" not in entry or not entry["timestamp"]:
+                                    # Use the file's date as fallback timestamp
+                                    fallback_timestamp = datetime.combine(check_date, datetime.min.time())
+                                    entry["timestamp"] = fallback_timestamp.replace(tzinfo=timezone.utc).isoformat()
+                                    entry["_fallback_timestamp"] = True  # Mark as fallback for display
+                                
+                                transactions.append(entry)
+                        except json.JSONDecodeError:
+                            # Skip malformed JSON lines
+                            continue
+                        except Exception:
+                            # Skip any other parsing errors
+                            continue
+            except Exception:
+                continue
+        
+        # Sort by timestamp (newest first), with safe fallback for missing timestamps
+        def get_sort_key(transaction):
+            timestamp = transaction.get("timestamp", "")
+            if not timestamp:
+                # If still no timestamp, use a very old date so it appears last
+                return "1970-01-01T00:00:00Z"
+            return timestamp
+        
+        transactions.sort(key=get_sort_key, reverse=True)
+        return transactions
 
     def _append_line(self, obj: dict):
         try:
@@ -399,9 +466,17 @@ class TimekeeperApp:
         except Exception:
             pass
 
+        # Button frame for Earn Credits and Account buttons
+        button_frame = ttk.Frame(container)
+        button_frame.pack(pady=(8, 16))
+        
         # Earn Credit button
-        self.earn_credit_button = ttk.Button(container, text="Earn Credits", command=self._show_earn_credit_screen)
-        self.earn_credit_button.pack(pady=(8, 16))
+        self.earn_credit_button = ttk.Button(button_frame, text="Earn Credits", command=self._show_earn_credit_screen)
+        self.earn_credit_button.pack(side=tk.LEFT, padx=(0, 8))
+        
+        # Account button
+        self.account_button = ttk.Button(button_frame, text="Your Account", command=self._show_account_screen)
+        self.account_button.pack(side=tk.LEFT, padx=(8, 0))
         
         # Update earn credit button state
         self._update_earn_credit_button_state()
@@ -722,6 +797,251 @@ class TimekeeperApp:
         # Hide next button
         self.next_button.pack_forget()
 
+    def _show_account_screen(self):
+        """Show the account screen with transaction history."""
+        # Clear all current UI elements and unbind events
+        for child in self.root.winfo_children():
+            try:
+                child.destroy()
+            except Exception:
+                pass
+        
+        # Clear any existing bindings to prevent memory leaks
+        try:
+            self.root.unbind("<Escape>")
+        except Exception:
+            pass
+        
+        # Ensure window is properly configured for the new screen
+        try:
+            self.root.attributes("-fullscreen", True)
+            self.root.attributes("-topmost", True)
+            self.root.focus_force()
+            self.root.lift()
+        except Exception:
+            pass
+        
+        # Build account UI
+        self._build_account_ui()
+        
+        # Update the window
+        self.root.update_idletasks()
+        self.ui_visible = False  # We're not on the main screen anymore
+
+    def _build_account_ui(self):
+        """Build the account screen UI."""
+        try:
+            container = ttk.Frame(self.root, padding=32)
+            container.pack(fill=tk.BOTH, expand=True)
+
+            # Header with back button
+            header_frame = ttk.Frame(container)
+            header_frame.pack(fill=tk.X, pady=(0, 24))
+            
+            # Back button
+            back_button = ttk.Button(header_frame, text="← Back to Main", command=self._return_to_main_from_account)
+            back_button.pack(side=tk.LEFT, padx=(0, 20))
+            
+            # Title
+            title = tk.Label(container, text="Your Account", font=("Helvetica", 32, "bold"))
+            title.pack(pady=(0, 16))
+
+            # Current credit balance
+            balance_frame = ttk.Frame(container)
+            balance_frame.pack(pady=(0, 24))
+            
+            balance_label = tk.Label(balance_frame, text="Current Balance:", font=("Helvetica", 20))
+            balance_label.pack(side=tk.LEFT, padx=(0, 8))
+            
+            balance_value = tk.Label(balance_frame, text=f"{self.state.total_credits} credits", 
+                                   font=("Helvetica", 24, "bold"), foreground="green")
+            balance_value.pack(side=tk.LEFT)
+
+            # Transaction history section
+            history_label = tk.Label(container, text="Transaction History (Last 30 Days)", 
+                                   font=("Helvetica", 18, "bold"))
+            history_label.pack(pady=(0, 8), anchor="w")
+            
+            # Add helpful note about data compatibility
+            note_label = tk.Label(container, 
+                                text="Note: Older transactions may show approximate times due to data format changes.",
+                                font=("Helvetica", 10), foreground="gray")
+            note_label.pack(pady=(0, 8), anchor="w")
+
+            # Create scrollable frame for transactions
+            canvas = tk.Canvas(container, height=400)
+            scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+            scrollable_frame = ttk.Frame(canvas)
+
+            scrollable_frame.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            )
+
+            canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+
+            # Get and display transactions
+            transactions = self.logger.get_credit_transactions()
+            
+            if not transactions:
+                no_trans_label = tk.Label(scrollable_frame, text="No transactions found.", 
+                                        font=("Helvetica", 16), foreground="gray")
+                no_trans_label.pack(pady=20)
+            else:
+                # Headers
+                header_frame = ttk.Frame(scrollable_frame)
+                header_frame.pack(fill=tk.X, pady=(0, 10))
+                
+                tk.Label(header_frame, text="Date", font=("Helvetica", 12, "bold"), width=12).pack(side=tk.LEFT)
+                tk.Label(header_frame, text="Type", font=("Helvetica", 12, "bold"), width=10).pack(side=tk.LEFT)
+                tk.Label(header_frame, text="Amount", font=("Helvetica", 12, "bold"), width=8).pack(side=tk.LEFT)
+                tk.Label(header_frame, text="Details", font=("Helvetica", 12, "bold"), width=40).pack(side=tk.LEFT)
+                
+                # Add separator
+                separator = ttk.Separator(scrollable_frame, orient='horizontal')
+                separator.pack(fill=tk.X, pady=(0, 10))
+
+                # Transaction rows
+                for transaction in transactions:
+                    self._add_transaction_row(scrollable_frame, transaction)
+
+            # Bind Escape key to go back
+            self.root.bind("<Escape>", lambda e: self._return_to_main_from_account())
+            
+            # Final update
+            self.root.update_idletasks()
+            
+        except Exception as e:
+            # If there's an error, show it and go back to main
+            error_label = tk.Label(self.root, text=f"Error building Account UI: {str(e)}", 
+                                 font=("Helvetica", 16), foreground="red")
+            error_label.pack(expand=True)
+            self.root.after(3000, self._return_to_main_from_account)  # Go back after 3 seconds
+
+    def _add_transaction_row(self, parent, transaction):
+        """Add a single transaction row to the scrollable frame."""
+        row_frame = ttk.Frame(parent)
+        row_frame.pack(fill=tk.X, pady=2)
+        
+        # Parse timestamp with improved error handling
+        date_str = "Unknown"
+        time_str = ""
+        is_fallback = transaction.get("_fallback_timestamp", False)
+        
+        try:
+            from datetime import datetime
+            timestamp_str = transaction.get("timestamp", "")
+            if timestamp_str:
+                # Handle different timestamp formats
+                if timestamp_str.endswith("Z"):
+                    timestamp_str = timestamp_str.replace("Z", "+00:00")
+                elif not timestamp_str.endswith("+00:00") and "+" not in timestamp_str[-6:]:
+                    # Add UTC timezone if no timezone info
+                    timestamp_str += "+00:00"
+                
+                timestamp = datetime.fromisoformat(timestamp_str)
+                date_str = timestamp.strftime("%m/%d/%Y")
+                
+                if is_fallback:
+                    time_str = "(approx)"  # Indicate this is a fallback date
+                else:
+                    time_str = timestamp.strftime("%H:%M")
+        except Exception as e:
+            # If all parsing fails, try to extract date from filename or use unknown
+            date_str = "Unknown"
+            time_str = "(old data)"
+        
+        # Date column
+        date_label = tk.Label(row_frame, text=f"{date_str}\n{time_str}", 
+                            font=("Helvetica", 10), width=12, anchor="w")
+        date_label.pack(side=tk.LEFT)
+        
+        # Type column
+        event_type = transaction.get("event", "")
+        if event_type == "credit_earned":
+            type_text = "Earned"
+            type_color = "green"
+        elif event_type == "credit_spent":
+            type_text = "Spent"
+            type_color = "red"
+        else:
+            type_text = "Unknown"
+            type_color = "black"
+            
+        type_label = tk.Label(row_frame, text=type_text, font=("Helvetica", 10), 
+                            width=10, anchor="w", foreground=type_color)
+        type_label.pack(side=tk.LEFT)
+        
+        # Amount column with safe fallbacks
+        try:
+            if event_type == "credit_earned":
+                points = transaction.get('points', 0)
+                # Handle case where points might be missing or invalid
+                if not isinstance(points, (int, float)) or points is None:
+                    points = 0
+                amount = f"+{int(points)}"
+                amount_color = "green"
+            elif event_type == "credit_spent":
+                spend_amount = transaction.get('amount', 0)
+                if not isinstance(spend_amount, (int, float)) or spend_amount is None:
+                    spend_amount = 0
+                amount = f"-{int(spend_amount)}"
+                amount_color = "red"
+            else:
+                amount = "0"
+                amount_color = "black"
+        except Exception:
+            amount = "?"
+            amount_color = "gray"
+            
+        amount_label = tk.Label(row_frame, text=amount, font=("Helvetica", 10), 
+                              width=8, anchor="w", foreground=amount_color)
+        amount_label.pack(side=tk.LEFT)
+        
+        # Details column with safe fallbacks
+        try:
+            if event_type == "credit_earned":
+                difficulty = transaction.get("difficulty", "unknown").capitalize()
+                if difficulty.lower() == "unknown" or not difficulty:
+                    difficulty = "Unknown"
+                
+                correct = transaction.get("correct", None)
+                if correct is True:
+                    status = "Correct"
+                elif correct is False:
+                    status = "Wrong"
+                else:
+                    status = "Unknown"
+                
+                question = transaction.get("question", "")
+                if question and len(question) > 30:
+                    question = question[:30] + "..."
+                
+                if question:
+                    details = f"{difficulty} question: {question} - {status}"
+                else:
+                    details = f"{difficulty} question - {status}"
+            elif event_type == "credit_spent":
+                details = transaction.get("description", "Credit spent")
+                if not details:
+                    details = "Credit spent"
+            else:
+                details = "Unknown transaction"
+        except Exception:
+            details = "Data parsing error"
+            
+        details_label = tk.Label(row_frame, text=details, font=("Helvetica", 10), 
+                               width=40, anchor="w", wraplength=300)
+        details_label.pack(side=tk.LEFT)
+
+    def _return_to_main_from_account(self):
+        """Return to main screen from account screen."""
+        self._do_return_to_main()
+
     def _return_to_main(self):
         """Return to the main screen."""
         # Check if user has earned credits in this session
@@ -1014,5 +1334,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

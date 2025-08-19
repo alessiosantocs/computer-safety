@@ -692,6 +692,9 @@ class TimekeeperApp:
         # Update UI
         self.question_label.config(text=self.current_question)
         self.answer_var.set("")
+        
+        # Re-enable answer entry and focus on it
+        self.answer_entry.config(state=tk.NORMAL)
         self.answer_entry.focus()
         
         # Hide result and next button
@@ -700,6 +703,9 @@ class TimekeeperApp:
         
         # Enable submit button
         self.submit_button.config(state=tk.NORMAL)
+        
+        # Rebind Enter key to submit answer for the new question
+        self.answer_entry.bind("<Return>", lambda e: self._submit_answer())
 
     def _submit_answer(self):
         """Submit the user's answer and check if correct."""
@@ -709,8 +715,12 @@ class TimekeeperApp:
             self.result_label.config(text="Please enter a valid number!", foreground="red")
             return
         
-        # Disable submit button
+        # Disable submit button and answer entry to prevent multiple submissions
         self.submit_button.config(state=tk.DISABLED)
+        self.answer_entry.config(state=tk.DISABLED)
+        
+        # Unbind Enter key to prevent repeated submissions
+        self.answer_entry.unbind("<Return>")
         
         # Check answer
         if user_answer == self.current_answer:

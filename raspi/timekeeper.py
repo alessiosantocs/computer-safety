@@ -79,6 +79,7 @@ class PersistentState:
         self.total_credits = 0
         self.questions_answered_today = 0
         self.last_question_date = today_str()
+        self.extra_minutes_purchased_today = 0  # Track purchased extra minutes
         self._last_save_monotonic = time.monotonic()
         self._load()
 
@@ -94,6 +95,7 @@ class PersistentState:
                     self.total_credits = int(data.get("total_credits", 0))
                     self.questions_answered_today = int(data.get("questions_answered_today", 0))
                     self.last_question_date = data.get("last_question_date", today_str())
+                    self.extra_minutes_purchased_today = int(data.get("extra_minutes_purchased_today", 0))
                 else:
                     # New day - reset daily counters but keep credits
                     self.date = today_str()
@@ -101,6 +103,7 @@ class PersistentState:
                     self.total_credits = int(data.get("total_credits", 0))  # Credits persist
                     self.questions_answered_today = 0
                     self.last_question_date = today_str()
+                    self.extra_minutes_purchased_today = 0  # Reset purchased minutes daily
                     self._save()
             except Exception:
                 # Corrupt or unreadable state: reset
@@ -109,6 +112,7 @@ class PersistentState:
                 self.total_credits = 0
                 self.questions_answered_today = 0
                 self.last_question_date = today_str()
+                self.extra_minutes_purchased_today = 0
                 self._save()
         else:
             self._save()
@@ -120,6 +124,7 @@ class PersistentState:
             "total_credits": int(self.total_credits),
             "questions_answered_today": int(self.questions_answered_today),
             "last_question_date": self.last_question_date,
+            "extra_minutes_purchased_today": int(self.extra_minutes_purchased_today),
         }
         try:
             tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -148,13 +153,146 @@ class PersistentState:
         self._save()
 
     def remaining_seconds(self) -> int:
-        remaining = DAILY_LIMIT_SECONDS - int(self.seconds_used_today)
-        return max(0, remaining)
+        """Calculate remaining seconds with error handling."""
+        try:
+            # Validate that extra_minutes_purchased_today is reasonable
+            extra_minutes = getattr(self, 'extra_minutes_purchased_today', 0)
+            if not isinstance(extra_minutes, (int, float)) or extra_minutes < 0:
+                _debug_log(f"Invalid extra_minutes_purchased_today: {extra_minutes}, resetting to 0")
+                extra_minutes = 0
+                self.extra_minutes_purchased_today = 0
+            
+            # Cap extra minutes at a reasonable maximum (24 hours = 1440 minutes)
+            if extra_minutes > 1440:
+                _debug_log(f"Extra minutes too high: {extra_minutes}, capping at 1440")
+                extra_minutes = 1440
+                self.extra_minutes_purchased_today = 1440
+            
+            # Base daily limit plus any purchased extra minutes
+            try:
+                extra_seconds = int(extra_minutes * 60)
+                total_limit = DAILY_LIMIT_SECONDS + extra_seconds
+                
+                # Check for overflow
+                if total_limit < DAILY_LIMIT_SECONDS:
+                    _debug_log("Integer overflow in total_limit calculation")
+                    total_limit = DAILY_LIMIT_SECONDS  # Fall back to base limit
+            except (OverflowError, ValueError, TypeError) as e:
+                _debug_log(f"Error calculating total limit: {str(e)}")
+                total_limit = DAILY_LIMIT_SECONDS  # Fall back to base limit
+            
+            # Calculate remaining time
+            try:
+                seconds_used = int(getattr(self, 'seconds_used_today', 0))
+                if seconds_used < 0:
+                    _debug_log(f"Invalid seconds_used_today: {seconds_used}, resetting to 0")
+                    seconds_used = 0
+                    self.seconds_used_today = 0
+                
+                remaining = total_limit - seconds_used
+                return max(0, remaining)
+            except (ValueError, TypeError, OverflowError) as e:
+                _debug_log(f"Error calculating remaining seconds: {str(e)}")
+                # Return base remaining time as fallback
+                return max(0, DAILY_LIMIT_SECONDS - int(getattr(self, 'seconds_used_today', 0)))
+                
+        except Exception as e:
+            _debug_log(f"Unexpected error in remaining_seconds: {str(e)}")
+            # Ultimate fallback - return base daily limit
+            return max(0, DAILY_LIMIT_SECONDS)
 
     def add_credits(self, amount: int):
         """Add credits to user's account."""
         self.total_credits = max(0, self.total_credits + amount)
         self._save()
+
+    def buy_minutes(self, minutes: int) -> bool:
+        """
+        Buy extra minutes using credits. Each minute costs 5 credits.
+        
+        Args:
+            minutes: Number of minutes to purchase
+            
+        Returns:
+            bool: True if purchase successful, False if not enough credits or invalid input
+        """
+        try:
+            # Input validation
+            if not isinstance(minutes, int) or minutes <= 0:
+                _debug_log(f"Invalid minutes value: {minutes}")
+                return False
+            
+            # Prevent unreasonably large purchases (max 24 hours = 1440 minutes)
+            if minutes > 1440:
+                _debug_log(f"Minutes too large: {minutes}")
+                return False
+            
+            # Calculate credits needed with overflow protection
+            try:
+                credits_needed = minutes * 5
+                # Check for integer overflow
+                if credits_needed < 0 or credits_needed // 5 != minutes:
+                    _debug_log(f"Integer overflow in credits calculation: {minutes} * 5")
+                    return False
+            except (OverflowError, ArithmeticError):
+                _debug_log(f"Arithmetic error calculating credits for {minutes} minutes")
+                return False
+            
+            # Check if user has enough credits
+            if self.total_credits < credits_needed:
+                _debug_log(f"Insufficient credits: need {credits_needed}, have {self.total_credits}")
+                return False
+            
+            # Perform the transaction
+            old_credits = self.total_credits
+            old_minutes = self.extra_minutes_purchased_today
+            
+            self.total_credits -= credits_needed
+            self.extra_minutes_purchased_today += minutes
+            
+            # Ensure values remain non-negative
+            self.total_credits = max(0, self.total_credits)
+            self.extra_minutes_purchased_today = max(0, self.extra_minutes_purchased_today)
+            
+            try:
+                self._save()
+                _debug_log(f"Successfully purchased {minutes} minutes for {credits_needed} credits")
+                return True
+            except Exception as e:
+                # Rollback on save failure
+                _debug_log(f"Save failed during purchase, rolling back: {str(e)}")
+                self.total_credits = old_credits
+                self.extra_minutes_purchased_today = old_minutes
+                return False
+                
+        except Exception as e:
+            _debug_log(f"Unexpected error in buy_minutes: {str(e)}")
+            return False
+
+    def can_buy_minutes(self, minutes: int) -> bool:
+        """Check if user has enough credits to buy specified minutes."""
+        try:
+            # Input validation
+            if not isinstance(minutes, int) or minutes <= 0:
+                return False
+            
+            # Prevent unreasonably large purchases (max 24 hours = 1440 minutes)
+            if minutes > 1440:
+                return False
+            
+            # Calculate credits needed with overflow protection
+            try:
+                credits_needed = minutes * 5
+                # Check for integer overflow
+                if credits_needed < 0 or credits_needed // 5 != minutes:
+                    return False
+            except (OverflowError, ArithmeticError):
+                return False
+            
+            return self.total_credits >= credits_needed
+        except Exception:
+            # On any error, assume user cannot buy
+            return False
 
     def can_answer_question(self) -> bool:
         """Check if user can answer more questions today."""
@@ -316,6 +454,31 @@ class SessionLogger:
         }
         self._append_line(entry)
 
+    def log_minutes_purchased(self, minutes: int, credits_spent: int):
+        """Log minute purchase transaction."""
+        try:
+            # Input validation
+            if not isinstance(minutes, int) or not isinstance(credits_spent, int):
+                _debug_log(f"Invalid input types for logging: minutes={type(minutes)}, credits={type(credits_spent)}")
+                return
+            
+            if minutes <= 0 or credits_spent <= 0:
+                _debug_log(f"Invalid values for logging: minutes={minutes}, credits={credits_spent}")
+                return
+            
+            now_iso = datetime.now(timezone.utc).isoformat()
+            entry = {
+                "event": "credit_spent",
+                "timestamp": now_iso,
+                "amount": int(credits_spent),
+                "description": f"Purchased {int(minutes)} extra minutes",
+                "minutes_purchased": int(minutes),
+            }
+            self._append_line(entry)
+        except Exception as e:
+            _debug_log(f"Error logging minutes purchase: {str(e)}")
+            # Don't raise - logging failure shouldn't break the purchase
+
     def get_credit_transactions(self, days_back: int = 30) -> list[dict]:
         """Get all credit transactions from the last N days."""
         transactions = []
@@ -466,7 +629,7 @@ class TimekeeperApp:
         except Exception:
             pass
 
-        # Button frame for Earn Credits and Account buttons
+        # Button frame for Earn Credits, Buy Extra Time, and Account buttons
         button_frame = ttk.Frame(container)
         button_frame.pack(pady=(8, 16))
         
@@ -474,15 +637,20 @@ class TimekeeperApp:
         self.earn_credit_button = ttk.Button(button_frame, text="Earn Credits", command=self._show_earn_credit_screen)
         self.earn_credit_button.pack(side=tk.LEFT, padx=(0, 8))
         
+        # Buy Extra Time button
+        self.buy_time_button = ttk.Button(button_frame, text="Buy Extra Time", command=self._show_buy_time_screen)
+        self.buy_time_button.pack(side=tk.LEFT, padx=(0, 8))
+        
         # Account button
         self.account_button = ttk.Button(button_frame, text="Your Account", command=self._show_account_screen)
         self.account_button.pack(side=tk.LEFT, padx=(8, 0))
         
-        # Update earn credit button state
+        # Update button states
         self._update_earn_credit_button_state()
+        self._update_buy_time_button_state()
 
         # Footer hint
-        hint = tk.Label(container, text="Your daily limit is 30 minutes. Time counts from login until logout.", font=("Helvetica", 12))
+        hint = tk.Label(container, text="Your daily limit is 30 minutes. You can buy extra time with credits (5 credits = 1 minute).", font=("Helvetica", 12))
         hint.pack(side=tk.BOTTOM, pady=(12, 0))
 
         # Make sure the window grabs focus
@@ -507,6 +675,46 @@ class TimekeeperApp:
             else:
                 self.earn_credit_button.config(state=tk.DISABLED, text="Daily Limit Reached (20/20)")
         except Exception:
+            pass
+
+    def _update_buy_time_button_state(self):
+        """Update the buy extra time button state based on available credits."""
+        try:
+            # Check if button still exists
+            if not hasattr(self, 'buy_time_button'):
+                return
+            
+            # Safely check widget existence
+            try:
+                if not self.buy_time_button.winfo_exists():
+                    return
+            except Exception:
+                return
+            
+            # Check if state object exists and is valid
+            if not hasattr(self, 'state') or self.state is None:
+                _debug_log("State object missing in _update_buy_time_button_state")
+                return
+            
+            # Safely check if user can buy minutes
+            can_buy = False
+            try:
+                can_buy = self.state.can_buy_minutes(1)  # Check if can buy at least 1 minute
+            except Exception as e:
+                _debug_log(f"Error checking can_buy_minutes: {str(e)}")
+                can_buy = False
+            
+            # Update button state
+            try:
+                if can_buy:
+                    self.buy_time_button.config(state=tk.NORMAL, text="Buy Extra Time")
+                else:
+                    self.buy_time_button.config(state=tk.DISABLED, text="Not Enough Credits")
+            except Exception as e:
+                _debug_log(f"Error updating buy time button: {str(e)}")
+                
+        except Exception as e:
+            _debug_log(f"Unexpected error in _update_buy_time_button_state: {str(e)}")
             pass
 
     def _show_earn_credit_screen(self):
@@ -838,6 +1046,478 @@ class TimekeeperApp:
         self.root.update_idletasks()
         self.ui_visible = False  # We're not on the main screen anymore
 
+    def _show_buy_time_screen(self):
+        """Show the buy extra time screen."""
+        try:
+            # Validate state
+            if not hasattr(self, 'state') or self.state is None:
+                _debug_log("State object missing in _show_buy_time_screen")
+                return
+            
+            # Check if user has any credits
+            try:
+                if self.state.total_credits < 5:  # Need at least 5 credits for 1 minute
+                    _debug_log("User has insufficient credits for buy time screen")
+                    return
+            except Exception as e:
+                _debug_log(f"Error checking credits: {str(e)}")
+                return
+            
+            # Clear all current UI elements and unbind events
+            try:
+                for child in self.root.winfo_children():
+                    try:
+                        child.destroy()
+                    except Exception:
+                        pass
+            except Exception as e:
+                _debug_log(f"Error clearing UI elements: {str(e)}")
+            
+            # Clear any existing bindings to prevent memory leaks
+            try:
+                self.root.unbind("<Escape>")
+            except Exception:
+                pass
+            
+            # Ensure window is properly configured for the new screen
+            try:
+                self.root.attributes("-fullscreen", True)
+                self.root.attributes("-topmost", True)
+                self.root.focus_force()
+                self.root.lift()
+            except Exception as e:
+                _debug_log(f"Error configuring window: {str(e)}")
+            
+            # Build buy time UI with error handling
+            try:
+                self._build_buy_time_ui()
+            except Exception as e:
+                _debug_log(f"Error building buy time UI: {str(e)}")
+                # Fall back to main screen if UI building fails
+                try:
+                    self._do_return_to_main()
+                except Exception:
+                    _debug_log("Failed to return to main screen after UI error")
+                return
+            
+            # Update the window
+            try:
+                self.root.update_idletasks()
+                self.ui_visible = False  # We're not on the main screen anymore
+            except Exception as e:
+                _debug_log(f"Error updating window: {str(e)}")
+                
+        except Exception as e:
+            _debug_log(f"Unexpected error in _show_buy_time_screen: {str(e)}")
+            # Try to return to main screen as a safety measure
+            try:
+                self._do_return_to_main()
+            except Exception:
+                _debug_log("Failed to return to main screen after unexpected error")
+
+    def _build_buy_time_ui(self):
+        """Build the buy extra time screen UI."""
+        try:
+            container = ttk.Frame(self.root, padding=32)
+            container.pack(fill=tk.BOTH, expand=True)
+
+            # Header with back button
+            header_frame = ttk.Frame(container)
+            header_frame.pack(fill=tk.X, pady=(0, 24))
+            
+            # Back button
+            back_button = ttk.Button(header_frame, text="← Back to Main", command=self._return_to_main_from_buy_time)
+            back_button.pack(side=tk.LEFT, padx=(0, 20))
+            
+            # Title
+            title = tk.Label(container, text="Buy Extra Time", font=("Helvetica", 32, "bold"))
+            title.pack(pady=(0, 16))
+
+            # Current status display
+            status_frame = ttk.Frame(container)
+            status_frame.pack(pady=(0, 24))
+            
+            # Current credits
+            credit_label = tk.Label(status_frame, text="Your Credits:", font=("Helvetica", 20))
+            credit_label.pack(side=tk.LEFT, padx=(0, 8))
+            
+            self.buy_time_credit_display = tk.Label(status_frame, text=str(self.state.total_credits), 
+                                                   font=("Helvetica", 24, "bold"), foreground="green")
+            self.buy_time_credit_display.pack(side=tk.LEFT)
+
+            # Current extra time purchased today
+            if self.state.extra_minutes_purchased_today > 0:
+                extra_time_label = tk.Label(container, 
+                                          text=f"Extra time purchased today: {self.state.extra_minutes_purchased_today} minutes", 
+                                          font=("Helvetica", 16), foreground="blue")
+                extra_time_label.pack(pady=(0, 16))
+
+            # Pricing info
+            pricing_frame = ttk.Frame(container)
+            pricing_frame.pack(pady=(0, 24))
+            
+            pricing_title = tk.Label(pricing_frame, text="Pricing:", font=("Helvetica", 18, "bold"))
+            pricing_title.pack(pady=(0, 8))
+            
+            pricing_info = tk.Label(pricing_frame, text="5 credits = 1 minute of extra computer time", 
+                                  font=("Helvetica", 16))
+            pricing_info.pack()
+
+            # Purchase options
+            purchase_frame = ttk.Frame(container)
+            purchase_frame.pack(pady=(0, 24))
+            
+            purchase_title = tk.Label(purchase_frame, text="How many minutes would you like to buy?", 
+                                    font=("Helvetica", 18, "bold"))
+            purchase_title.pack(pady=(0, 16))
+
+            # Quick purchase buttons
+            button_frame = ttk.Frame(purchase_frame)
+            button_frame.pack(pady=(0, 16))
+            
+            # Calculate max minutes user can afford
+            max_minutes = self.state.total_credits // 5
+            
+            # Common purchase options
+            purchase_options = [1, 5, 10, 15, 30]
+            for minutes in purchase_options:
+                if minutes <= max_minutes:
+                    credits_needed = minutes * 5
+                    btn_text = f"{minutes} min ({credits_needed} credits)"
+                    btn = ttk.Button(button_frame, text=btn_text, 
+                                   command=lambda m=minutes: self._purchase_minutes(m))
+                    btn.pack(side=tk.LEFT, padx=4)
+
+            # Custom amount entry
+            custom_frame = ttk.Frame(purchase_frame)
+            custom_frame.pack(pady=(16, 0))
+            
+            custom_label = tk.Label(custom_frame, text="Or enter custom amount:", font=("Helvetica", 14))
+            custom_label.pack(side=tk.LEFT, padx=(0, 8))
+            
+            self.custom_minutes_var = tk.StringVar(value="")
+            self.custom_minutes_entry = ttk.Entry(custom_frame, textvariable=self.custom_minutes_var, width=10)
+            self.custom_minutes_entry.pack(side=tk.LEFT, padx=(0, 8))
+            
+            tk.Label(custom_frame, text="minutes", font=("Helvetica", 14)).pack(side=tk.LEFT, padx=(0, 16))
+            
+            self.custom_buy_button = ttk.Button(custom_frame, text="Buy Custom Amount", 
+                                              command=self._purchase_custom_minutes)
+            self.custom_buy_button.pack(side=tk.LEFT)
+
+            # Result message area
+            self.buy_result_label = tk.Label(container, text="", font=("Helvetica", 16))
+            self.buy_result_label.pack(pady=(16, 0))
+
+            # Bind Enter key to custom purchase
+            self.custom_minutes_entry.bind("<Return>", lambda e: self._purchase_custom_minutes())
+            
+            # Bind Escape key to go back
+            self.root.bind("<Escape>", lambda e: self._return_to_main_from_buy_time())
+            
+            # Final update
+            self.root.update_idletasks()
+            
+        except Exception as e:
+            # If there's an error, show it and go back to main
+            error_label = tk.Label(self.root, text=f"Error building Buy Time UI: {str(e)}", 
+                                 font=("Helvetica", 16), foreground="red")
+            error_label.pack(expand=True)
+            self.root.after(3000, self._return_to_main_from_buy_time)  # Go back after 3 seconds
+
+    def _purchase_minutes(self, minutes: int):
+        """Purchase the specified number of minutes."""
+        try:
+            # Validate input
+            if not isinstance(minutes, int) or minutes <= 0:
+                _debug_log(f"Invalid minutes value in _purchase_minutes: {minutes}")
+                if hasattr(self, 'buy_result_label') and self.buy_result_label.winfo_exists():
+                    self.buy_result_label.config(text="Invalid input!", foreground="red")
+                return
+            
+            # Check if UI elements still exist
+            if not hasattr(self, 'buy_result_label') or not self.buy_result_label.winfo_exists():
+                _debug_log("UI elements no longer exist during purchase")
+                return
+            
+            # Check if user can afford the purchase
+            if not self.state.can_buy_minutes(minutes):
+                self.buy_result_label.config(text="Not enough credits!", foreground="red")
+                return
+            
+            # Show confirmation dialog
+            self._show_purchase_confirmation(minutes)
+            
+        except Exception as e:
+            _debug_log(f"Error in _purchase_minutes: {str(e)}")
+            try:
+                if hasattr(self, 'buy_result_label') and self.buy_result_label.winfo_exists():
+                    self.buy_result_label.config(text="An error occurred. Please try again.", foreground="red")
+            except Exception:
+                pass  # If even error display fails, fail silently
+
+    def _purchase_custom_minutes(self):
+        """Purchase custom number of minutes from entry field."""
+        try:
+            # Get and validate input
+            input_text = self.custom_minutes_var.get().strip()
+            if not input_text:
+                self.buy_result_label.config(text="Please enter a number!", foreground="red")
+                return
+            
+            # Check for reasonable length to prevent very large numbers
+            if len(input_text) > 10:  # More than 10 digits is unreasonable
+                self.buy_result_label.config(text="Number too large!", foreground="red")
+                return
+            
+            try:
+                minutes = int(input_text)
+            except ValueError:
+                self.buy_result_label.config(text="Please enter a valid number!", foreground="red")
+                return
+            except OverflowError:
+                self.buy_result_label.config(text="Number too large!", foreground="red")
+                return
+            
+            if minutes <= 0:
+                self.buy_result_label.config(text="Please enter a positive number!", foreground="red")
+                return
+            
+            if minutes > 1440:  # More than 24 hours
+                self.buy_result_label.config(text="Maximum 1440 minutes (24 hours) allowed!", foreground="red")
+                return
+            
+            # Check if UI elements still exist before proceeding
+            if not hasattr(self, 'buy_result_label') or not self.buy_result_label.winfo_exists():
+                _debug_log("UI elements no longer exist during custom purchase")
+                return
+            
+            self._purchase_minutes(minutes)
+            
+        except Exception as e:
+            _debug_log(f"Error in _purchase_custom_minutes: {str(e)}")
+            try:
+                if hasattr(self, 'buy_result_label') and self.buy_result_label.winfo_exists():
+                    self.buy_result_label.config(text="An error occurred. Please try again.", foreground="red")
+            except Exception:
+                pass  # If even error display fails, fail silently
+
+    def _show_purchase_confirmation(self, minutes: int):
+        """Show confirmation dialog for purchase."""
+        try:
+            # Validate input and state
+            if not isinstance(minutes, int) or minutes <= 0:
+                _debug_log(f"Invalid minutes in confirmation dialog: {minutes}")
+                return
+            
+            credits_needed = minutes * 5
+            
+            # Double-check the user still has enough credits
+            if not self.state.can_buy_minutes(minutes):
+                if hasattr(self, 'buy_result_label') and self.buy_result_label.winfo_exists():
+                    self.buy_result_label.config(text="Not enough credits!", foreground="red")
+                return
+            
+            # Create confirmation dialog with error handling
+            try:
+                confirm_window = tk.Toplevel(self.root)
+                confirm_window.title("Confirm Purchase")
+                confirm_window.geometry("450x250")
+                confirm_window.transient(self.root)
+                confirm_window.grab_set()
+            except Exception as e:
+                _debug_log(f"Failed to create confirmation window: {str(e)}")
+                # Fall back to direct purchase without confirmation
+                self._complete_purchase(minutes)
+                return
+            
+            try:
+                # Center the dialog
+                confirm_window.geometry("+%d+%d" % (self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 100))
+                
+                # Dialog content
+                msg = tk.Label(confirm_window, text="Confirm Purchase", 
+                              font=("Helvetica", 18, "bold"))
+                msg.pack(pady=(20, 10))
+                
+                details = tk.Label(confirm_window, 
+                                  text=f"Buy {minutes} minute{'s' if minutes != 1 else ''} for {credits_needed} credits?", 
+                                  font=("Helvetica", 14))
+                details.pack(pady=(0, 10))
+                
+                balance_info = tk.Label(confirm_window, 
+                                       text=f"Current balance: {self.state.total_credits} credits\nAfter purchase: {self.state.total_credits - credits_needed} credits", 
+                                       font=("Helvetica", 12), foreground="gray")
+                balance_info.pack(pady=(0, 20))
+                
+                # Buttons with error-safe callbacks
+                button_frame = ttk.Frame(confirm_window)
+                button_frame.pack(pady=(0, 20))
+                
+                def safe_purchase():
+                    try:
+                        confirm_window.destroy()
+                        self._complete_purchase(minutes)
+                    except Exception as e:
+                        _debug_log(f"Error in purchase callback: {str(e)}")
+                        try:
+                            confirm_window.destroy()
+                        except Exception:
+                            pass
+                
+                def safe_cancel():
+                    try:
+                        confirm_window.destroy()
+                    except Exception as e:
+                        _debug_log(f"Error in cancel callback: {str(e)}")
+                
+                yes_button = ttk.Button(button_frame, text="Yes, Buy Now", command=safe_purchase)
+                yes_button.pack(side=tk.LEFT, padx=10)
+                
+                no_button = ttk.Button(button_frame, text="Cancel", command=safe_cancel)
+                no_button.pack(side=tk.LEFT, padx=10)
+                
+                # Focus on the dialog
+                confirm_window.focus_force()
+                
+            except Exception as e:
+                _debug_log(f"Error building confirmation dialog: {str(e)}")
+                try:
+                    confirm_window.destroy()
+                except Exception:
+                    pass
+                # Fall back to direct purchase
+                self._complete_purchase(minutes)
+                
+        except Exception as e:
+            _debug_log(f"Error in _show_purchase_confirmation: {str(e)}")
+            # Try to show error message if possible
+            try:
+                if hasattr(self, 'buy_result_label') and self.buy_result_label.winfo_exists():
+                    self.buy_result_label.config(text="Error showing confirmation. Please try again.", foreground="red")
+            except Exception:
+                pass
+
+    def _complete_purchase(self, minutes: int):
+        """Complete the purchase after confirmation."""
+        try:
+            # Validate input
+            if not isinstance(minutes, int) or minutes <= 0:
+                _debug_log(f"Invalid minutes in _complete_purchase: {minutes}")
+                if hasattr(self, 'buy_result_label') and self.buy_result_label.winfo_exists():
+                    self.buy_result_label.config(text="Invalid purchase request!", foreground="red")
+                return
+            
+            credits_needed = minutes * 5
+            
+            # Final validation before purchase
+            if not self.state.can_buy_minutes(minutes):
+                _debug_log(f"Cannot buy {minutes} minutes - insufficient credits")
+                if hasattr(self, 'buy_result_label') and self.buy_result_label.winfo_exists():
+                    self.buy_result_label.config(text="Not enough credits!", foreground="red")
+                return
+            
+            # Attempt the purchase
+            purchase_success = False
+            try:
+                purchase_success = self.state.buy_minutes(minutes)
+            except Exception as e:
+                _debug_log(f"Error during state.buy_minutes: {str(e)}")
+                purchase_success = False
+            
+            if purchase_success:
+                try:
+                    # Log the transaction (non-critical, don't fail purchase if this fails)
+                    self.logger.log_minutes_purchased(minutes, credits_needed)
+                except Exception as e:
+                    _debug_log(f"Failed to log purchase, but purchase succeeded: {str(e)}")
+                
+                # Update displays with error handling
+                try:
+                    if hasattr(self, 'buy_time_credit_display') and self.buy_time_credit_display.winfo_exists():
+                        self.buy_time_credit_display.config(text=str(self.state.total_credits))
+                except Exception as e:
+                    _debug_log(f"Failed to update credit display: {str(e)}")
+                
+                # Show success message
+                try:
+                    if hasattr(self, 'buy_result_label') and self.buy_result_label.winfo_exists():
+                        self.buy_result_label.config(
+                            text=f"Success! Purchased {minutes} minute{'s' if minutes != 1 else ''} for {credits_needed} credits.",
+                            foreground="green"
+                        )
+                except Exception as e:
+                    _debug_log(f"Failed to show success message: {str(e)}")
+                
+                # Clear custom entry with error handling
+                try:
+                    if hasattr(self, 'custom_minutes_var'):
+                        self.custom_minutes_var.set("")
+                except Exception as e:
+                    _debug_log(f"Failed to clear custom entry: {str(e)}")
+                
+                # Schedule UI refresh with error handling
+                try:
+                    self.root.after(2000, self._safe_refresh_buy_time_ui)
+                except Exception as e:
+                    _debug_log(f"Failed to schedule UI refresh: {str(e)}")
+                    # Try immediate refresh as fallback
+                    try:
+                        self._safe_refresh_buy_time_ui()
+                    except Exception:
+                        _debug_log("Even immediate UI refresh failed")
+            else:
+                # Purchase failed
+                _debug_log(f"Purchase failed for {minutes} minutes")
+                try:
+                    if hasattr(self, 'buy_result_label') and self.buy_result_label.winfo_exists():
+                        self.buy_result_label.config(text="Purchase failed! Please try again.", foreground="red")
+                except Exception as e:
+                    _debug_log(f"Failed to show error message: {str(e)}")
+                    
+        except Exception as e:
+            _debug_log(f"Unexpected error in _complete_purchase: {str(e)}")
+            try:
+                if hasattr(self, 'buy_result_label') and self.buy_result_label.winfo_exists():
+                    self.buy_result_label.config(text="An error occurred during purchase. Please try again.", foreground="red")
+            except Exception:
+                pass  # If even error display fails, fail silently
+
+    def _refresh_buy_time_ui(self):
+        """Refresh the buy time UI to show updated information."""
+        try:
+            self._build_buy_time_ui()
+        except Exception as e:
+            _debug_log(f"Error refreshing buy time UI: {str(e)}")
+
+    def _safe_refresh_buy_time_ui(self):
+        """Safely refresh the buy time UI with comprehensive error handling."""
+        try:
+            # Check if we're still in the buy time screen
+            if not hasattr(self, 'buy_time_credit_display'):
+                _debug_log("Not in buy time screen, skipping refresh")
+                return
+            
+            # Check if root window still exists
+            if not hasattr(self, 'root') or not self.root.winfo_exists():
+                _debug_log("Root window no longer exists, cannot refresh")
+                return
+            
+            self._build_buy_time_ui()
+            
+        except Exception as e:
+            _debug_log(f"Error in safe refresh: {str(e)}")
+            # If refresh fails, try to at least update the credit display
+            try:
+                if hasattr(self, 'buy_time_credit_display') and self.buy_time_credit_display.winfo_exists():
+                    self.buy_time_credit_display.config(text=str(self.state.total_credits))
+            except Exception:
+                _debug_log("Even fallback credit display update failed")
+
+    def _return_to_main_from_buy_time(self):
+        """Return to main screen from buy time screen."""
+        self._do_return_to_main()
+
     def _build_account_ui(self):
         """Build the account screen UI."""
         try:
@@ -1135,6 +1815,7 @@ class TimekeeperApp:
             # Update all displays and states
             self._update_credit_display()
             self._update_earn_credit_button_state()
+            self._update_buy_time_button_state()
             
             # Force update to ensure everything is displayed
             self.root.update_idletasks()
@@ -1236,6 +1917,7 @@ class TimekeeperApp:
                 # Also update credit displays and button states
                 self._update_credit_display()
                 self._update_earn_credit_button_state()
+                self._update_buy_time_button_state()
             except Exception as e:
                 _debug_log(f"Error updating UI in tick: {str(e)}")
                 # If UI update fails, mark UI as not visible to prevent further errors
